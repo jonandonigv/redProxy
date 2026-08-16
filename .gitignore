@@ -1,0 +1,10 @@
+# Local working files
+Plan.md
+
+# Build artifacts
+/redproxy
+/demo-backend
+/bin/
+
+# OS / editor noise
+.DS_Store
