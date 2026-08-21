@@ -32,6 +32,7 @@ type Router struct {
 
 // New creates a Router, failing fast on invalid route definitions.
 func New(routes []Route) (*Router, error) {
+	seen := make(map[string]bool, len(routes))
 	for _, rt := range routes {
 		if rt.PathPrefix == "" {
 			return nil, fmt.Errorf("route %q: path_prefix is required", rt.Name)
@@ -39,6 +40,13 @@ func New(routes []Route) (*Router, error) {
 		if !strings.HasPrefix(rt.PathPrefix, "/") {
 			return nil, fmt.Errorf("route %q: path_prefix must start with \"/\"", rt.Name)
 		}
+		if len(rt.PathPrefix) > 1 && strings.HasSuffix(rt.PathPrefix, "/") {
+			return nil, fmt.Errorf("route %q: path_prefix must not end with \"/\" (a bare \"/\" is fine)", rt.Name)
+		}
+		if seen[rt.Name] {
+			return nil, fmt.Errorf("route %q: duplicate route name", rt.Name)
+		}
+		seen[rt.Name] = true
 		if rt.Handler == nil {
 			return nil, fmt.Errorf("route %q: handler is required", rt.Name)
 		}
@@ -63,7 +71,7 @@ func (r *Router) Match(host, path string) *Route {
 		if rt.Host != "" && rt.Host != h {
 			continue
 		}
-		if !strings.HasPrefix(path, rt.PathPrefix) {
+		if !matchesPrefix(path, rt.PathPrefix) {
 			continue
 		}
 		if best == nil || len(rt.PathPrefix) > len(best.PathPrefix) {
@@ -71,6 +79,19 @@ func (r *Router) Match(host, path string) *Route {
 		}
 	}
 	return best
+}
+
+// matchesPrefix reports whether path starts with prefix at a segment
+// boundary: "/api" matches "/api" and "/api/x" but never "/apiv2". A bare
+// "/" prefix matches every path.
+func matchesPrefix(path, prefix string) bool {
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	if len(path) == len(prefix) || prefix == "/" {
+		return true
+	}
+	return path[len(prefix)] == '/'
 }
 
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {

@@ -51,6 +51,25 @@ func TestLongestPrefixWins(t *testing.T) {
 	}
 }
 
+// A prefix must only capture paths at a segment boundary: "/api" matches
+// "/api" and "/api/x" but never "/apiv2".
+func TestPrefixBoundaryMatching(t *testing.T) {
+	r := newRouter(t,
+		markerRoute("api", "", "/api", "A"),
+		markerRoute("web", "", "/", "W"),
+	)
+
+	if got := get(t, r, "h.example.com", "/api").Body.String(); got != "A" {
+		t.Errorf("/api routed to %q, want A (path == prefix)", got)
+	}
+	if got := get(t, r, "h.example.com", "/api/users").Body.String(); got != "A" {
+		t.Errorf("/api/users routed to %q, want A", got)
+	}
+	if got := get(t, r, "h.example.com", "/apiv2/users").Body.String(); got != "W" {
+		t.Errorf("/apiv2/users routed to %q, want W: /api must not capture non-boundary paths", got)
+	}
+}
+
 func TestHostRouting(t *testing.T) {
 	r := newRouter(t,
 		markerRoute("tenant-a", "a.example.com", "/", "A"),
@@ -199,5 +218,28 @@ func TestNewRejectsBadRoutes(t *testing.T) {
 				t.Errorf("New() error = %q, want it to contain %q", err.Error(), tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestNewRejectsDuplicateRouteNames(t *testing.T) {
+	_, err := New([]Route{
+		{Name: "dup", PathPrefix: "/a", Handler: http.NotFoundHandler()},
+		{Name: "dup", PathPrefix: "/b", Handler: http.NotFoundHandler()},
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate route name") {
+		t.Fatalf("New() error = %v, want duplicate route name error", err)
+	}
+}
+
+func TestNewRejectsTrailingSlashPrefix(t *testing.T) {
+	_, err := New([]Route{{Name: "x", PathPrefix: "/api/", Handler: http.NotFoundHandler()}})
+	if err == nil || !strings.Contains(err.Error(), `must not end with "/"`) {
+		t.Fatalf("New() error = %v, want trailing-slash rejection", err)
+	}
+
+	// A bare "/" prefix stays legal.
+	r := newRouter(t, markerRoute("web", "", "/", "W"))
+	if got := get(t, r, "h.example.com", "/x").Body.String(); got != "W" {
+		t.Errorf("/x routed to %q, want W (bare / prefix must keep working)", got)
 	}
 }
