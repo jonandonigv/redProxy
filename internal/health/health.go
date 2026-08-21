@@ -43,6 +43,7 @@ type Checker struct {
 	client *http.Client
 	checks []Check
 
+	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
@@ -74,14 +75,17 @@ func New(checks []Check) *Checker {
 	}
 }
 
-// Start launches a prober goroutine per check. Call once, before or after
-// traffic flows; Stop releases everything.
+// Start launches a prober goroutine per check. It is a no-op if the Checker
+// was already started: a Checker runs one generation of probers for its
+// lifetime, released by Stop.
 func (c *Checker) Start() {
-	ctx, cancel := context.WithCancel(context.Background())
-	c.cancel = cancel
+	if c.cancel != nil {
+		return
+	}
+	c.ctx, c.cancel = context.WithCancel(context.Background())
 	for _, chk := range c.checks {
 		c.wg.Add(1)
-		go c.run(ctx, chk)
+		go c.run(c.ctx, chk)
 	}
 }
 
@@ -103,14 +107,14 @@ func (c *Checker) run(ctx context.Context, chk Check) {
 	// Probe immediately so a dead backend is caught at startup instead of
 	// after a full interval.
 	state := newState(chk.Pool)
-	c.probeAll(state, chk)
+	c.probeAll(ctx, state, chk)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c.probeAll(state, chk)
+			c.probeAll(ctx, state, chk)
 		}
 	}
 }
@@ -132,9 +136,9 @@ func newState(pool *balancer.Pool) poolState {
 	return st
 }
 
-func (c *Checker) probeAll(state poolState, chk Check) {
+func (c *Checker) probeAll(ctx context.Context, state poolState, chk Check) {
 	for _, b := range chk.Pool.Backends() {
-		ok := c.probeOne(b.URL, chk.Path, chk.Timeout)
+		ok := c.probeOne(ctx, b.URL, chk.Path, chk.Timeout)
 		st := state[b]
 
 		healthy, fails, successes := foldResult(
@@ -168,11 +172,12 @@ func foldResult(healthy, ok bool, fails, successes, failThreshold, recoverThresh
 }
 
 // probeOne GETs the health endpoint and reports whether the backend answered
-// with a 2xx within the timeout.
-func (c *Checker) probeOne(backendURL, path string, timeout time.Duration) bool {
+// with a 2xx within the timeout. The request is cancelled when ctx is done
+// (e.g. on Stop), so in-flight probes do not delay shutdown.
+func (c *Checker) probeOne(ctx context.Context, backendURL, path string, timeout time.Duration) bool {
 	u := strings.TrimSuffix(backendURL, "/") + path
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)

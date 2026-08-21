@@ -228,3 +228,90 @@ func TestCheckerStopIsIdempotent(t *testing.T) {
 		t.Fatal("second Stop() did not return")
 	}
 }
+
+// Stop must cancel in-flight probes instead of waiting out their timeout.
+func TestCheckerStopCancelsInflightProbes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done(): // client went away
+		case <-time.After(5 * time.Second):
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	pool := newPool(t, srv.URL)
+	c := New([]Check{{
+		Pool: pool, Path: "/healthz",
+		Interval: time.Hour, Timeout: 5 * time.Second, // only the startup probe runs
+		FailThreshold: 1, RecoverThreshold: 1,
+	}})
+	c.Start()
+
+	time.Sleep(50 * time.Millisecond) // let the startup probe get in flight
+
+	start := time.Now()
+	c.Stop()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Stop() took %v, want < 1s: in-flight probes must be cancelled", elapsed)
+	}
+}
+
+// A second Start must not launch (and orphan) another generation of probers.
+func TestCheckerStartIsIdempotent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	pool := newPool(t, srv.URL)
+	c := New([]Check{{
+		Pool: pool, Path: "/healthz",
+		Interval: 5 * time.Millisecond, Timeout: 500 * time.Millisecond,
+	}})
+	c.Start()
+	defer c.Stop()
+
+	first := c.ctx
+	c.Start()
+	if c.ctx != first {
+		t.Fatal("second Start() replaced the checker context, orphaning the first prober generation")
+	}
+}
+
+// Counter state must be tracked per backend: one failing backend goes down
+// while its healthy neighbor stays up.
+func TestCheckerPerBackendStateIsIndependent(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer bad.Close()
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer good.Close()
+
+	pool := newPool(t, bad.URL, good.URL)
+	c := New([]Check{{
+		Pool: pool, Path: "/",
+		Interval: 5 * time.Millisecond, Timeout: 500 * time.Millisecond,
+		FailThreshold: 2, RecoverThreshold: 1,
+	}})
+	c.Start()
+	defer c.Stop()
+
+	badB, goodB := pool.Backends()[0], pool.Backends()[1]
+
+	// Shared counters would reset the failure streak on every success from
+	// the good backend, so the bad one would never reach the threshold.
+	waitFor(t, 2*time.Second, func() bool { return !badB.Healthy() },
+		"failing backend should reach the failure threshold and go down")
+
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if !goodB.Healthy() {
+			t.Fatal("healthy backend was marked down: state leaked across the pool")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
