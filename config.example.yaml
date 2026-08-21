@@ -1,0 +1,49 @@
+# redProxy example configuration.
+#
+# Start three demo backends, then run the proxy with this file:
+#
+#   ./bin/demo-backend -listen :9001
+#   ./bin/demo-backend -listen :9002
+#   ./bin/demo-backend -listen :8001
+#   ./bin/redproxy -config config.example.yaml
+
+server:
+  listen: ":8080"        # proxy traffic port
+  admin_listen: ":9090"  # /metrics and /healthz for the proxy itself
+
+routes:
+  # /api/* → round-robin over the two API backends.
+  # The /api prefix is stripped before forwarding (backend sees /users).
+  - name: api
+    match:
+      path_prefix: /api     # add `host: api.local` to scope this route to a hostname
+    strip_prefix: /api
+    strategy: round_robin   # round_robin | least_conn | random
+    backends:
+      - url: http://localhost:9001
+      - url: http://localhost:9002
+    health_check:
+      path: /healthz
+      interval: 2s
+      timeout: 1s
+    middlewares:
+      rate_limit:
+        rps: 2              # deliberately tiny so you can watch 429s in the demo
+        burst: 3
+      headers:
+        request_set:
+          X-Forwarded-By: redproxy
+        response_set:
+          X-Proxy: redproxy
+
+  # Everything else → the web backend, least connections first.
+  - name: web
+    match:
+      path_prefix: /
+    strategy: least_conn
+    backends:
+      - url: http://localhost:8001
+    health_check:
+      path: /healthz
+      interval: 2s
+      timeout: 1s
