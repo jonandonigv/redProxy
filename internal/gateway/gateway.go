@@ -6,6 +6,10 @@
 // AdminHandler. It owns its background work, started by Start and released by
 // Stop, but not the listeners, http.Servers, or signals: those stay with the
 // command that embeds it.
+//
+// A Gateway runs one lifecycle. Start and Stop are idempotent, Stop is safe
+// before Start, and a Gateway cannot be restarted after Stop: callers create a
+// new Gateway instead.
 package gateway
 
 import (
@@ -136,8 +140,10 @@ func (g *Gateway) Start() {
 	}(g.pollerDone)
 }
 
-// Stop releases the gateway's background work. It is safe to call more than
-// once.
+// Stop releases the gateway's background work and waits for it to exit. It is
+// safe to call more than once and before Start. Stop does not unregister the
+// gateway's HTTP handlers; serving remains possible. Restarting after Stop is
+// unsupported: Start becomes a no-op.
 func (g *Gateway) Stop() {
 	g.mu.Lock()
 	if g.stopped {
