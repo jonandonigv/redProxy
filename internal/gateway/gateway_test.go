@@ -129,6 +129,59 @@ func TestGatewayStripsPrefixAndAppliesHeaders(t *testing.T) {
 	}
 }
 
+func TestGatewayFromParsedConfig(t *testing.T) {
+	api := newCaptureBackend(t)
+	web := newBackend(t, "web")
+
+	cfg, err := config.Parse([]byte(fmt.Sprintf(`
+server:
+  listen: ":8080"
+  admin_listen: ":9090"
+routes:
+  - name: api
+    match:
+      host: api.local
+      path_prefix: /api
+    strip_prefix: /api
+    strategy: round_robin
+    backends:
+      - url: %s
+    middlewares:
+      headers:
+        request_set:
+          X-From: yaml
+        response_set:
+          X-Proxy: redproxy
+  - name: web
+    match:
+      path_prefix: /
+    strategy: least_conn
+    backends:
+      - url: %s
+`, api.srv.URL, web.URL)))
+	if err != nil {
+		t.Fatalf("config.Parse() error: %v", err)
+	}
+
+	gw := newGateway(t, cfg)
+
+	rec := request(t, gw, "api.local", "/api/users")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("api request status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Proxy"); got != "redproxy" {
+		t.Errorf("response header X-Proxy = %q, want redproxy", got)
+	}
+	if path, headers := api.snapshot(); path != "/users" || headers.Get("X-From") != "yaml" {
+		t.Errorf("backend saw path %q, X-From %q; want /users, yaml", path, headers.Get("X-From"))
+	}
+
+	rec = request(t, gw, "other.local", "/anything")
+	if rec.Code != http.StatusOK || rec.Body.String() != "web" {
+		t.Errorf("web fallback = %d %q, want 200 web", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGatewayAdminHandlerServesHealthAndMetrics(t *testing.T) {
 	backend := newBackend(t, "web")
 	gw := newGateway(t, configFor(route("web", "", "/", backend.URL)))
