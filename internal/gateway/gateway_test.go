@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"redproxy/internal/config"
@@ -50,6 +51,81 @@ func request(t *testing.T, gw *gateway.Gateway, host, path string) *httptest.Res
 	rec := httptest.NewRecorder()
 	gw.ServeHTTP(rec, req)
 	return rec
+}
+
+// captureBackend records the request it served and adds response headers.
+type captureBackend struct {
+	srv *httptest.Server
+
+	mu      sync.Mutex
+	path    string
+	headers http.Header
+}
+
+func newCaptureBackend(t *testing.T) *captureBackend {
+	t.Helper()
+	b := &captureBackend{}
+	b.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b.mu.Lock()
+		b.path = r.URL.Path
+		b.headers = r.Header.Clone()
+		b.mu.Unlock()
+
+		w.Header().Set("X-Upstream", "yes")
+		w.Header().Set("X-Remove", "me")
+		fmt.Fprint(w, "proxied")
+	}))
+	t.Cleanup(b.srv.Close)
+	return b
+}
+
+func (b *captureBackend) snapshot() (string, http.Header) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.path, b.headers.Clone()
+}
+
+func TestGatewayStripsPrefixAndAppliesHeaders(t *testing.T) {
+	backend := newCaptureBackend(t)
+
+	api := route("api", "", "/api", backend.srv.URL)
+	api.StripPrefix = "/api"
+	api.Middlewares.Headers = &config.HeadersConfig{
+		RequestSet:     map[string]string{"X-Forwarded-By": "redproxy"},
+		RequestRemove:  []string{"X-Secret"},
+		ResponseSet:    map[string]string{"X-Proxy": "redproxy"},
+		ResponseRemove: []string{"X-Remove"},
+	}
+	gw := newGateway(t, configFor(api))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.Header.Set("X-Secret", "do-not-forward")
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Proxy"); got != "redproxy" {
+		t.Errorf("response header X-Proxy = %q, want redproxy", got)
+	}
+	if got := rec.Header().Get("X-Remove"); got != "" {
+		t.Errorf("response header X-Remove = %q, want it removed", got)
+	}
+	if got := rec.Header().Get("X-Upstream"); got != "yes" {
+		t.Errorf("response header X-Upstream = %q, want it passed through", got)
+	}
+
+	path, headers := backend.snapshot()
+	if path != "/users" {
+		t.Errorf("backend saw path %q, want /users (strip_prefix applied)", path)
+	}
+	if got := headers.Get("X-Forwarded-By"); got != "redproxy" {
+		t.Errorf("backend saw X-Forwarded-By = %q, want redproxy", got)
+	}
+	if got := headers.Get("X-Secret"); got != "" {
+		t.Errorf("backend saw X-Secret = %q, want it removed", got)
+	}
 }
 
 func TestGatewayRoutesByHostAndLongestPathPrefix(t *testing.T) {
