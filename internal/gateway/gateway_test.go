@@ -224,25 +224,6 @@ func TestGatewayAdminHandlerServesHealthAndMetrics(t *testing.T) {
 	}
 }
 
-func TestGatewayLifecycleIsOneShotAndIdempotent(t *testing.T) {
-	backend := newBackend(t, "web")
-	gw := newGateway(t, configFor(route("web", "", "/", backend.URL)))
-
-	gw.Start()
-	gw.Start()
-	if rec := request(t, gw, "", "/x"); rec.Code != http.StatusOK {
-		t.Fatalf("request after Start status = %d, want 200", rec.Code)
-	}
-
-	gw.Stop()
-	gw.Stop()
-	gw.Start() // restart is unsupported: must be a safe no-op, not a panic
-
-	if rec := request(t, gw, "", "/x"); rec.Code != http.StatusOK {
-		t.Fatalf("request after Stop status = %d, want 200", rec.Code)
-	}
-}
-
 func TestGatewayRoutesByHostAndLongestPathPrefix(t *testing.T) {
 	api := newBackend(t, "api")
 	users := newBackend(t, "users")

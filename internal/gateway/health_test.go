@@ -31,6 +31,7 @@ type harnessBackend struct {
 
 	healthy atomic.Bool
 	traffic atomic.Int64
+	probes  atomic.Int64
 }
 
 func newHarnessBackend(t *testing.T, name string) *harnessBackend {
@@ -40,6 +41,7 @@ func newHarnessBackend(t *testing.T, name string) *harnessBackend {
 	b.healthy.Store(true)
 	b.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == harnessHealthPath {
+			b.probes.Add(1)
 			if !b.healthy.Load() {
 				http.Error(w, "unhealthy", http.StatusServiceUnavailable)
 				return
@@ -61,6 +63,11 @@ func (b *harnessBackend) setHealthy(v bool) { b.healthy.Store(v) }
 
 // served returns how many normal (non-probe) requests the backend has served.
 func (b *harnessBackend) served() int64 { return b.traffic.Load() }
+
+// probed returns how many health probes the backend has answered, kept
+// separate from traffic so tests can observe the health checker's background
+// work.
+func (b *harnessBackend) probed() int64 { return b.probes.Load() }
 
 // eventually polls check until it succeeds or the timeout expires. Fixed
 // waits are never assertions: tests observe state, not elapsed time.
