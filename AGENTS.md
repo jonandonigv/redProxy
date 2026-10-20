@@ -7,7 +7,7 @@ redProxy is a portfolio-quality reverse proxy written in Go, built on the stdlib
 
 Confirmed feature set:
 
-- Path/host-based routing to multiple upstreams
+- Path/host-based routing to multiple backends
 - Load balancing: round-robin, least-connections, random
 - Active health checks (unhealthy backends are excluded automatically)
 - Middleware chain: structured request logging, header manipulation, per-client-IP rate limiting
@@ -23,9 +23,10 @@ before making architectural decisions; keep it and this file in sync with the co
 
 ```
 cmd/
-  redproxy/        # main entrypoint: wiring + graceful shutdown
+  redproxy/        # flags, config loading, listeners, signals, graceful shutdown
   demo-backend/    # tiny echo backend for manual testing/demos
 internal/
+  gateway/         # assembles routes, pools, middleware chains, health checks, metrics
   config/          # YAML structs, loading, validation
   router/          # host + longest-path-prefix matching
   balancer/        # Backend type + round_robin / least_conn / random strategies
@@ -78,9 +79,16 @@ make run      # run the proxy with config.example.yaml
 
 - Unit tests for: balancer strategies (ordering, min-conn selection, unhealthy exclusion),
   router matching (host + longest prefix), config validation, rate limiter, header middleware.
-- Integration test: real proxy in front of `httptest.Server` backends — verify routing,
-  header injection, backend kill → exclusion → recovery, 502/503 behavior when all backends are down.
-- Run `go vet ./...` and `go test ./...` before considering any change complete.
+- Gateway black-box integration tests in `internal/gateway` (external `gateway_test`
+  package, `TestGateway*`): a real Gateway in front of `httptest.Server` backends — verify
+  host + longest-prefix routing and `strip_prefix`, request/response header injection,
+  rate-limited 429s in `requests_total` and the log record, backend health failure →
+  exclusion → readmission, 502 when a selected Backend's transport fails, 503 when
+  no Backend is available, `backend_up` immediately
+  after `Start`, and the one-shot lifecycle (`Start`/`Stop` idempotent, probing halted
+  by `Stop`).
+- Run `go vet ./...` and `go test ./...` (or `go test -race ./...` for the gateway suite)
+  before considering any change complete.
 
 ## Git
 

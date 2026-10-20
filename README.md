@@ -6,7 +6,7 @@ YAML file.
 
 ## Features
 
-- **Path/host-based routing** to multiple upstreams (longest prefix wins)
+- **Path/host-based routing** to multiple backends (longest prefix wins)
 - **Load balancing**: round-robin, least-connections, random — per route
 - **Active health checks** with failure/recovery thresholds; unhealthy
   backends stop receiving traffic and are restored automatically
@@ -69,7 +69,7 @@ example. Highlights:
 | `routes[].match.host` | optional host filter (case-insensitive, port ignored) |
 | `routes[].strip_prefix` | removed from the path before forwarding |
 | `routes[].strategy` | `round_robin`, `least_conn`, or `random` |
-| `routes[].backends` | upstream URLs (`http://host:port`) |
+| `routes[].backends` | backend URLs (`http://host:port`) |
 | `routes[].health_check` | probe path, interval, timeout |
 | `routes[].middlewares.rate_limit` | per-client-IP token bucket (`rps`, `burst`) |
 | `routes[].middlewares.headers` | set/remove request and response headers |
@@ -89,15 +89,20 @@ Scraped from the admin port:
 ## Development
 
 ```sh
-make test   # go test ./... (unit + integration tests, race-safe)
+make test   # go test ./... — unit tests plus gateway black-box integration tests
 make vet    # go vet ./...
 ```
+
+The gateway integration tests live in `internal/gateway` (`TestGateway*`): they
+build a real Gateway and drive it over HTTP against in-process `httptest`
+backends. Run `go test -race ./...` to check the suite under the race detector.
 
 Layout:
 
 ```
-cmd/redproxy        entrypoint: wiring + graceful shutdown
+cmd/redproxy        entrypoint: flags, config loading, listeners, signals, shutdown
 cmd/demo-backend    tiny echo server for manual testing/demos
+internal/gateway    assembles routes, pools, middleware, health checks, metrics
 internal/config     YAML loading, strict validation
 internal/balancer   Backend type + round-robin / least-conn / random strategies
 internal/health     background health checker (atomic state)
