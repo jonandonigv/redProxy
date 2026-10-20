@@ -2,6 +2,7 @@ package gateway_test
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,7 +38,13 @@ func configFor(routes ...config.RouteConfig) *config.Config {
 
 func newGateway(t *testing.T, cfg *config.Config) *gateway.Gateway {
 	t.Helper()
-	gw, err := gateway.New(cfg, nil)
+	return newGatewayWithLogger(t, cfg, nil)
+}
+
+// newGatewayWithLogger builds a Gateway whose request logging goes to logger.
+func newGatewayWithLogger(t *testing.T, cfg *config.Config, logger *slog.Logger) *gateway.Gateway {
+	t.Helper()
+	gw, err := gateway.New(cfg, logger)
 	if err != nil {
 		t.Fatalf("gateway.New() error: %v", err)
 	}
