@@ -49,9 +49,9 @@ func run() error {
 	defer stop()
 
 	gw.Start()
-	// Unconditional cleanup: the idempotent Stop also runs on early returns,
-	// such as a listener that fails to bind. On the normal path the explicit
-	// Stop below happens first, after the servers drain.
+	// Unconditional cleanup: the idempotent Stop runs on every return path. The
+	// select below funnels both signals and listener failures through the same
+	// drain, which finishes before this deferred Stop releases background work.
 	defer gw.Stop()
 
 	proxySrv := &http.Server{
@@ -73,19 +73,23 @@ func run() error {
 		"routes", len(cfg.Routes),
 	)
 
+	var serveErr error
 	select {
 	case <-ctx.Done():
 	case err := <-errCh:
-		return fmt.Errorf("server failed: %w", err)
+		serveErr = fmt.Errorf("server failed: %w", err)
 	}
 
 	logger.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
+	// Drain both servers, including the survivor when only one listener
+	// failed, before the deferred Gateway Stop releases background work.
 	var wg sync.WaitGroup
-	wg.Add(2)
-	for _, srv := range []*http.Server{proxySrv, adminSrv} {
+	servers := []*http.Server{proxySrv, adminSrv}
+	wg.Add(len(servers))
+	for _, srv := range servers {
 		go func(s *http.Server) {
 			defer wg.Done()
 			_ = s.Shutdown(shutdownCtx)
@@ -93,7 +97,10 @@ func run() error {
 	}
 	wg.Wait()
 
-	gw.Stop()
+	if serveErr != nil {
+		return serveErr
+	}
+
 	logger.Info("redProxy stopped")
 	return nil
 }
