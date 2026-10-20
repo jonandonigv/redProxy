@@ -9,17 +9,25 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
+	"time"
 
 	"redproxy/internal/balancer"
 	"redproxy/internal/config"
+	"redproxy/internal/health"
 	"redproxy/internal/metrics"
 	"redproxy/internal/middleware"
 	"redproxy/internal/proxy"
 	"redproxy/internal/router"
 )
+
+// backendPollInterval is how often backend health is copied into the
+// backend_up gauge.
+const backendPollInterval = 5 * time.Second
 
 // Gateway is the assembled proxy for one configuration.
 type Gateway struct {
@@ -27,6 +35,14 @@ type Gateway struct {
 	metrics *metrics.Metrics
 	router  *router.Router
 	pools   []*balancer.Pool
+	checker *health.Checker
+	admin   http.Handler
+
+	mu         sync.Mutex
+	started    bool
+	stopped    bool
+	cancel     context.CancelFunc
+	pollerDone chan struct{}
 }
 
 // New builds the gateway for cfg. A nil logger falls back to slog.Default.
@@ -41,6 +57,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Gateway, error) {
 	}
 
 	routes := make([]router.Route, 0, len(cfg.Routes))
+	checks := make([]health.Check, 0, len(cfg.Routes))
+
 	for i := range cfg.Routes {
 		rc := &cfg.Routes[i]
 
@@ -57,6 +75,13 @@ func New(cfg *config.Config, logger *slog.Logger) (*Gateway, error) {
 			PathPrefix: rc.Match.PathPrefix,
 			Handler:    handler,
 		})
+
+		checks = append(checks, health.Check{
+			Pool:     pool,
+			Path:     rc.HealthCheck.Path,
+			Interval: rc.HealthCheck.Interval.D(),
+			Timeout:  rc.HealthCheck.Timeout.D(),
+		})
 	}
 
 	rt, err := router.New(routes)
@@ -64,6 +89,15 @@ func New(cfg *config.Config, logger *slog.Logger) (*Gateway, error) {
 		return nil, fmt.Errorf("building router: %w", err)
 	}
 	g.router = rt
+	g.checker = health.New(checks)
+
+	admin := http.NewServeMux()
+	admin.Handle("/metrics", g.metrics.Handler())
+	admin.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	g.admin = admin
 
 	return g, nil
 }
@@ -73,9 +107,54 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.router.ServeHTTP(w, r)
 }
 
+// AdminHandler serves the admin surface: Prometheus metrics and a static
+// liveness answer.
+func (g *Gateway) AdminHandler() http.Handler {
+	return g.admin
+}
+
+// Start launches the health checker and the backend_up poller. It is a no-op
+// after the first call and after Stop: a gateway runs one lifecycle.
+func (g *Gateway) Start() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.started || g.stopped {
+		return
+	}
+	g.started = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	g.cancel = cancel
+	g.pollerDone = make(chan struct{})
+
+	g.checker.Start()
+	go func(done chan struct{}) {
+		defer close(done)
+		g.pollBackendHealth(ctx)
+	}(g.pollerDone)
+}
+
 // Stop releases the gateway's background work. It is safe to call more than
 // once.
-func (g *Gateway) Stop() {}
+func (g *Gateway) Stop() {
+	g.mu.Lock()
+	if g.stopped {
+		g.mu.Unlock()
+		return
+	}
+	g.stopped = true
+	cancel, done := g.cancel, g.pollerDone
+	g.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
+	g.checker.Stop()
+}
 
 // chainFor builds the per-route middleware chain. Order matters: metrics
 // outermost so rejections are counted, then logging so they are recorded,
@@ -92,4 +171,29 @@ func (g *Gateway) chainFor(rc *config.RouteConfig) []middleware.Middleware {
 		mws = append(mws, middleware.Headers(*h))
 	}
 	return mws
+}
+
+// pollBackendHealth feeds the backend_up gauge from pool state until ctx is
+// cancelled. The first update runs immediately.
+func (g *Gateway) pollBackendHealth(ctx context.Context) {
+	ticker := time.NewTicker(backendPollInterval)
+	defer ticker.Stop()
+
+	update := func() {
+		for _, pool := range g.pools {
+			for _, b := range pool.Backends() {
+				g.metrics.SetBackendUp(b.URL, b.Healthy())
+			}
+		}
+	}
+
+	update()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			update()
+		}
+	}
 }

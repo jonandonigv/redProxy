@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -125,6 +126,60 @@ func TestGatewayStripsPrefixAndAppliesHeaders(t *testing.T) {
 	}
 	if got := headers.Get("X-Secret"); got != "" {
 		t.Errorf("backend saw X-Secret = %q, want it removed", got)
+	}
+}
+
+func TestGatewayAdminHandlerServesHealthAndMetrics(t *testing.T) {
+	backend := newBackend(t, "web")
+	gw := newGateway(t, configFor(route("web", "", "/", backend.URL)))
+	gw.Start()
+
+	health := httptest.NewRecorder()
+	gw.AdminHandler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("/healthz status = %d, want 200", health.Code)
+	}
+	if body := health.Body.String(); body != "ok" {
+		t.Errorf("/healthz body = %q, want ok", body)
+	}
+
+	// Generate traffic so the per-route request metrics exist.
+	if rec := request(t, gw, "", "/x"); rec.Code != http.StatusOK {
+		t.Fatalf("proxied request status = %d, want 200", rec.Code)
+	}
+
+	rec := httptest.NewRecorder()
+	gw.AdminHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/metrics status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	// backend_up is fed immediately on Start, not only after the 5s tick.
+	if want := `redproxy_backend_up{backend="` + backend.URL + `"} 1`; !strings.Contains(body, want) {
+		t.Errorf("/metrics missing %q immediately after Start", want)
+	}
+	if want := `redproxy_requests_total{code="200",route="web"} 1`; !strings.Contains(body, want) {
+		t.Errorf("/metrics missing %q", want)
+	}
+}
+
+func TestGatewayLifecycleIsOneShotAndIdempotent(t *testing.T) {
+	backend := newBackend(t, "web")
+	gw := newGateway(t, configFor(route("web", "", "/", backend.URL)))
+
+	gw.Start()
+	gw.Start()
+	if rec := request(t, gw, "", "/x"); rec.Code != http.StatusOK {
+		t.Fatalf("request after Start status = %d, want 200", rec.Code)
+	}
+
+	gw.Stop()
+	gw.Stop()
+	gw.Start() // restart is unsupported: must be a safe no-op, not a panic
+
+	if rec := request(t, gw, "", "/x"); rec.Code != http.StatusOK {
+		t.Fatalf("request after Stop status = %d, want 200", rec.Code)
 	}
 }
 
