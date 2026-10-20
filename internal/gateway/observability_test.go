@@ -22,18 +22,26 @@ func rateLimitedRoute(name, backendURL string) config.RouteConfig {
 	return rc
 }
 
-func TestGatewayRateLimitReturns429AfterBurst(t *testing.T) {
-	backend := newBackend(t, "web")
-	gw := newGateway(t, configFor(rateLimitedRoute("throttled", backend.URL)))
+// burstThenThrottle consumes the route's burst with a 200 and then gets a 429,
+// returning the rejected response so callers can inspect it.
+func burstThenThrottle(t *testing.T, gw *gateway.Gateway) *httptest.ResponseRecorder {
+	t.Helper()
 
 	if rec := request(t, gw, "", "/first"); rec.Code != http.StatusOK {
 		t.Fatalf("first request status = %d, want 200", rec.Code)
 	}
-
 	rec := request(t, gw, "", "/second")
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("second request status = %d, want 429", rec.Code)
 	}
+	return rec
+}
+
+func TestGatewayRateLimitReturns429AfterBurst(t *testing.T) {
+	backend := newBackend(t, "web")
+	gw := newGateway(t, configFor(rateLimitedRoute("throttled", backend.URL)))
+
+	rec := burstThenThrottle(t, gw)
 	if got := rec.Body.String(); !strings.Contains(got, "rate limit exceeded") {
 		t.Errorf("429 body = %q, want it to mention the rate limit", got)
 	}
@@ -119,12 +127,7 @@ func TestGatewayRateLimitedRequestAppearsInMetrics(t *testing.T) {
 	backend := newBackend(t, "web")
 	gw := newGateway(t, configFor(rateLimitedRoute("throttled", backend.URL)))
 
-	if rec := request(t, gw, "", "/first"); rec.Code != http.StatusOK {
-		t.Fatalf("first request status = %d, want 200", rec.Code)
-	}
-	if rec := request(t, gw, "", "/second"); rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("second request status = %d, want 429", rec.Code)
-	}
+	burstThenThrottle(t, gw)
 
 	samples := scrapeMetrics(t, gw)
 	if got := metricValue(t, samples, "redproxy_requests_total", map[string]string{
@@ -182,12 +185,7 @@ func TestGatewayRateLimitedRequestIsLoggedWithRouteAndStatus(t *testing.T) {
 	gw := newGatewayWithLogger(t, configFor(rateLimitedRoute("throttled", backend.URL)), logger)
 	gw.Start()
 
-	if rec := request(t, gw, "", "/first"); rec.Code != http.StatusOK {
-		t.Fatalf("first request status = %d, want 200", rec.Code)
-	}
-	if rec := request(t, gw, "", "/second"); rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("second request status = %d, want 429", rec.Code)
-	}
+	burstThenThrottle(t, gw)
 
 	var rejected []map[string]any
 	for _, rec := range logs.records(t) {
