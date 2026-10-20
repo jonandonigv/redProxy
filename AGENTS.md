@@ -7,7 +7,7 @@ redProxy is a portfolio-quality reverse proxy written in Go, built on the stdlib
 
 Confirmed feature set:
 
-- Path/host-based routing to multiple upstreams
+- Path/host-based routing to multiple backends
 - Load balancing: round-robin, least-connections, random
 - Active health checks (unhealthy backends are excluded automatically)
 - Middleware chain: structured request logging, header manipulation, per-client-IP rate limiting
