@@ -7,7 +7,7 @@ redProxy is a portfolio-quality reverse proxy written in Go, built on the stdlib
 
 Confirmed feature set:
 
-- Path/host-based routing to multiple upstreams
+- Path/host-based routing to multiple backends
 - Load balancing: round-robin, least-connections, random
 - Active health checks (unhealthy backends are excluded automatically)
 - Middleware chain: structured request logging, header manipulation, per-client-IP rate limiting
@@ -83,7 +83,8 @@ make run      # run the proxy with config.example.yaml
   package, `TestGateway*`): a real Gateway in front of `httptest.Server` backends — verify
   host + longest-prefix routing and `strip_prefix`, request/response header injection,
   rate-limited 429s in `requests_total` and the log record, backend health failure →
-  exclusion → readmission, 503 when all backends are down, `backend_up` immediately
+  exclusion → readmission, 502 when a selected Backend's transport fails, 503 when
+  no Backend is available, `backend_up` immediately
   after `Start`, and the one-shot lifecycle (`Start`/`Stop` idempotent, probing halted
   by `Stop`).
 - Run `go vet ./...` and `go test ./...` (or `go test -race ./...` for the gateway suite)

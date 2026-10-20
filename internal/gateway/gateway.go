@@ -47,6 +47,7 @@ type Gateway struct {
 	stopped    bool
 	cancel     context.CancelFunc
 	pollerDone chan struct{}
+	stopDone   chan struct{}
 }
 
 // New builds the gateway for cfg. A nil logger falls back to slog.Default.
@@ -141,26 +142,32 @@ func (g *Gateway) Start() {
 }
 
 // Stop releases the gateway's background work and waits for it to exit. It is
-// safe to call more than once and before Start. Stop does not unregister the
-// gateway's HTTP handlers; serving remains possible. Restarting after Stop is
-// unsupported: Start becomes a no-op.
+// safe to call more than once and before Start: every concurrent caller waits
+// for the same teardown to finish. Stop does not unregister the gateway's HTTP
+// handlers; serving remains possible. Restarting after Stop is unsupported:
+// Start becomes a no-op.
 func (g *Gateway) Stop() {
 	g.mu.Lock()
 	if g.stopped {
+		done := g.stopDone
 		g.mu.Unlock()
+		<-done
 		return
 	}
 	g.stopped = true
-	cancel, done := g.cancel, g.pollerDone
+	g.stopDone = make(chan struct{})
+	cancel, pollerDone, stopDone := g.cancel, g.pollerDone, g.stopDone
 	g.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
 	}
-	if done != nil {
-		<-done
+	if pollerDone != nil {
+		<-pollerDone
 	}
 	g.checker.Stop()
+
+	close(stopDone)
 }
 
 // chainFor builds the per-route middleware chain. Order matters: metrics

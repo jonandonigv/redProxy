@@ -79,7 +79,7 @@ func newCaptureBackend(t *testing.T) *captureBackend {
 		b.headers = r.Header.Clone()
 		b.mu.Unlock()
 
-		w.Header().Set("X-Upstream", "yes")
+		w.Header().Set("X-Backend", "yes")
 		w.Header().Set("X-Remove", "me")
 		fmt.Fprint(w, "proxied")
 	}))
@@ -120,8 +120,8 @@ func TestGatewayStripsPrefixAndAppliesHeaders(t *testing.T) {
 	if got := rec.Header().Get("X-Remove"); got != "" {
 		t.Errorf("response header X-Remove = %q, want it removed", got)
 	}
-	if got := rec.Header().Get("X-Upstream"); got != "yes" {
-		t.Errorf("response header X-Upstream = %q, want it passed through", got)
+	if got := rec.Header().Get("X-Backend"); got != "yes" {
+		t.Errorf("response header X-Backend = %q, want it passed through", got)
 	}
 
 	path, headers := backend.snapshot()
