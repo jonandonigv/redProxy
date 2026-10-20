@@ -49,6 +49,10 @@ func run() error {
 	defer stop()
 
 	gw.Start()
+	// Unconditional cleanup: the idempotent Stop also runs on early returns,
+	// such as a listener that fails to bind. On the normal path the explicit
+	// Stop below happens first, after the servers drain.
+	defer gw.Stop()
 
 	proxySrv := &http.Server{
 		Addr:         cfg.Server.Listen,
