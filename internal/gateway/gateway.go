@@ -129,6 +129,7 @@ func (g *Gateway) Start() {
 	g.pollerDone = make(chan struct{})
 
 	g.checker.Start()
+	g.updateBackendUp() // immediate first reading; the poller refreshes it every 5s
 	go func(done chan struct{}) {
 		defer close(done)
 		g.pollBackendHealth(ctx)
@@ -173,27 +174,27 @@ func (g *Gateway) chainFor(rc *config.RouteConfig) []middleware.Middleware {
 	return mws
 }
 
-// pollBackendHealth feeds the backend_up gauge from pool state until ctx is
-// cancelled. The first update runs immediately.
+// pollBackendHealth refreshes the backend_up gauge from pool state until ctx
+// is cancelled.
 func (g *Gateway) pollBackendHealth(ctx context.Context) {
 	ticker := time.NewTicker(backendPollInterval)
 	defer ticker.Stop()
 
-	update := func() {
-		for _, pool := range g.pools {
-			for _, b := range pool.Backends() {
-				g.metrics.SetBackendUp(b.URL, b.Healthy())
-			}
-		}
-	}
-
-	update()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			update()
+			g.updateBackendUp()
+		}
+	}
+}
+
+// updateBackendUp copies every backend's health into the backend_up gauge.
+func (g *Gateway) updateBackendUp() {
+	for _, pool := range g.pools {
+		for _, b := range pool.Backends() {
+			g.metrics.SetBackendUp(b.URL, b.Healthy())
 		}
 	}
 }
